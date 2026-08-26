@@ -1,0 +1,535 @@
+"""Static page that analyses a drift test dropped onto it.
+
+Parsing and metrics run in the browser; nothing is uploaded. The JavaScript
+mirrors hrdrift.analysis and the tests check the two agree.
+"""
+
+from __future__ import annotations
+
+import json
+
+from .analysis import (
+    BIN_EPSILON,
+    DEFAULT_TARGET,
+    MIN_BIN_SAMPLES,
+    SPEED_BIN_MS,
+    VALID_BLOCK_MIN,
+    VALID_MAX_HR_SPREAD,
+    VALID_MAX_SPEED_CV,
+    VALID_MAX_STOPPED_PCT,
+    Sweep,
+)
+from .track import ALT_SMOOTH_S, GRADE_WINDOW_M, NGP_WINDOW_S, STOP_SPEED, YARDS_PER_METRE
+
+__all__ = ["webapp"]
+
+
+def webapp(target: float = DEFAULT_TARGET, warmup_min: float = 15.0,
+           duration_min: float = 60.0) -> str:
+    """Render the drop-a-file analyser as a self-contained page."""
+    cfg = {
+        "target": target,
+        "warmup": warmup_min,
+        "duration": duration_min,
+        "stopSpeed": STOP_SPEED,
+        "ngpWindow": NGP_WINDOW_S,
+        "altSmooth": ALT_SMOOTH_S,
+        "gradeWindowM": GRADE_WINDOW_M,
+        "yardsPerMetre": YARDS_PER_METRE,
+        "binMs": SPEED_BIN_MS,
+        "binEps": BIN_EPSILON,
+        "minBin": MIN_BIN_SAMPLES,
+        "minBlock": VALID_BLOCK_MIN,
+        "maxStopped": VALID_MAX_STOPPED_PCT,
+        "maxSpeedCv": VALID_MAX_SPEED_CV,
+        "maxHrSpread": VALID_MAX_HR_SPREAD,
+        "unstableSpread": Sweep.UNSTABLE_SPREAD,
+        "tightSpread": Sweep.TIGHT_SPREAD,
+        "agreementShare": Sweep.AGREEMENT_SHARE,
+        "starts": [8, 10, 12, 15, 18, 20],
+        "blocks": [40, 45, 50, 55, 60],
+    }
+    return _PAGE.replace("__CFG__", json.dumps(cfg, separators=(",", ":")))
+
+
+_PAGE = r"""<title>Heart Rate Drift Test</title>
+<style>
+ :root { --bg:#fff; --fg:#16181d; --muted:#6b7280; --line:#e5e7eb; --card:#f8fafc;
+         --ok:#16a34a; --bad:#dc2626; --warn:#d97706; --accent:#3b82f6; }
+ @media (prefers-color-scheme: dark) { :root:not([data-theme=light]) {
+   --bg:#0f1115; --fg:#e8e8e8; --muted:#9aa3af; --line:#262b33; --card:#161a20; } }
+ :root[data-theme=dark] { --bg:#0f1115; --fg:#e8e8e8; --muted:#9aa3af; --line:#262b33; --card:#161a20; }
+ * { box-sizing:border-box; }
+ body { background:var(--bg); color:var(--fg); margin:0 auto; max-width:820px;
+   padding:40px 20px 70px;
+   font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+ h1 { font-size:26px; margin:0 0 6px; letter-spacing:-.02em; }
+ .lede { color:var(--muted); margin:0 0 28px; }
+ #drop { border:2px dashed var(--line); border-radius:12px; padding:44px 24px; text-align:center;
+   cursor:pointer; transition:border-color .15s, background .15s; background:var(--card); }
+ #drop:hover, #drop.over { border-color:var(--accent); background:color-mix(in srgb, var(--accent) 7%, var(--card)); }
+ #drop strong { display:block; font-size:17px; margin-bottom:4px; }
+ #drop span { color:var(--muted); font-size:14px; }
+ #file { display:none; }
+ .privacy { color:var(--muted); font-size:13px; text-align:center; margin-top:12px; }
+ #out { margin-top:30px; }
+ .answer { border-radius:12px; padding:22px 26px; background:var(--card);
+   border-left:5px solid var(--ok); }
+ .answer.over { border-left-color:var(--bad); }
+ .answer.invalid { border-left-color:var(--warn); }
+ .answer .big { font-size:31px; font-weight:600; letter-spacing:-.02em; line-height:1.25; }
+ .answer .line { margin-top:8px; }
+ .answer .thr { color:var(--muted); font-size:14px; margin-top:10px; }
+ h2 { font-size:13px; text-transform:uppercase; letter-spacing:.07em; color:var(--muted);
+   border-bottom:1px solid var(--line); padding-bottom:7px; margin:34px 0 6px; }
+ ul.why { list-style:none; padding:0; margin:10px 0 0; }
+ ul.why li { padding:11px 15px; background:var(--card); border-radius:7px; margin-bottom:7px;
+   border-left:3px solid var(--warn); font-size:15px; }
+ .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(158px,1fr)); gap:1px;
+   background:var(--line); border:1px solid var(--line); border-radius:9px; overflow:hidden;
+   margin-top:12px; }
+ .cell { background:var(--bg); padding:11px 14px; }
+ .cell .k { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.05em; }
+ .cell .v { font-size:19px; font-variant-numeric:tabular-nums; margin-top:2px; }
+ .cell .x { color:var(--muted); font-size:12px; }
+ .err { color:var(--bad); }
+ details { margin-top:20px; } summary { cursor:pointer; color:var(--muted); font-size:14px; }
+ table { border-collapse:collapse; width:100%; margin-top:10px; font-variant-numeric:tabular-nums; }
+ th,td { text-align:right; padding:6px 10px; border-bottom:1px solid var(--line); font-size:14px; }
+ th:first-child, td:first-child { text-align:left; }
+ footer { margin-top:44px; color:var(--muted); font-size:13px; border-top:1px solid var(--line);
+   padding-top:16px; }
+ a { color:var(--accent); }
+</style>
+<h1>Heart rate drift test</h1>
+<p class="lede">Drop a run and find out whether the effort was above or below your
+aerobic threshold &mdash; the field test used by Uphill Athlete and Evoke Endurance.</p>
+
+<div id="drop" tabindex="0" role="button" aria-label="Choose an activity file">
+  <strong>Drop a .tcx or .gpx file here</strong>
+  <span>or click to choose &middot; Strava exports work as-is</span>
+</div>
+<input type="file" id="file" accept=".tcx,.gpx,.xml">
+<p class="privacy">Analysed entirely in your browser. The file is never uploaded anywhere.</p>
+
+<div id="out"></div>
+
+<footer>
+  A drift test is 15&nbsp;min of warm-up, then 60&nbsp;min of steady effort on flat ground or a
+  treadmill, holding either heart rate or pace constant. Drift under 5%/hour means the effort was
+  at or below your aerobic threshold.
+</footer>
+
+<script>
+const CFG = __CFG__;
+
+// --- file parsing
+
+const localName = el => el.tagName.replace(/^.*:/, "");
+
+function parseActivity(text) {
+  const doc = new DOMParser().parseFromString(text, "application/xml");
+  // getElementsByTagName, not querySelector: the XML shim in the tests lacks it
+  if (doc.getElementsByTagName("parsererror").length)
+    throw new Error("That file is not valid XML.");
+
+  const pts = [];
+  const trackpoints = [...doc.getElementsByTagName("*")].filter(
+    el => localName(el) === "Trackpoint" || localName(el) === "trkpt");
+  if (!trackpoints.length) throw new Error("No track points found. Is this a .tcx or .gpx export?");
+
+  for (const tp of trackpoints) {
+    const pick = name => {
+      const hit = [...tp.getElementsByTagName("*")].find(e => localName(e) === name);
+      return hit ? hit.textContent.trim() : null;
+    };
+    const time = pick("Time") || pick("time");
+    if (!time) continue;
+    const hr = pick("Value") ?? pick("hr");
+    pts.push({
+      t: Date.parse(time) / 1000,
+      hr: hr === null ? NaN : parseFloat(hr),
+      dist: parseFloat(pick("DistanceMeters") ?? "NaN"),
+      alt: parseFloat(pick("AltitudeMeters") ?? pick("ele") ?? "NaN"),
+      lat: parseFloat(tp.getAttribute("lat") ?? pick("LatitudeDegrees") ?? "NaN"),
+      lon: parseFloat(tp.getAttribute("lon") ?? pick("LongitudeDegrees") ?? "NaN"),
+    });
+  }
+  if (pts.length < 60) throw new Error(`Only ${pts.length} track points; that is not a run.`);
+  pts.sort((a, b) => a.t - b.t);
+  if (pts.every(p => !isFinite(p.hr))) throw new Error("This file has no heart-rate data.");
+  return pts;
+}
+
+const haversine = (a, b) => {
+  const R = 6371000, rad = Math.PI / 180;
+  const dla = (b.lat - a.lat) * rad, dlo = (b.lon - a.lon) * rad;
+  const s = Math.sin(dla / 2) ** 2 +
+    Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(dlo / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(Math.min(1, s)));
+};
+
+function fillNaN(a) {
+  const out = Array.from(a);
+  let last = out.find(v => isFinite(v));
+  if (last === undefined) return out.fill(0);
+  for (let i = 0; i < out.length; i++) {
+    if (isFinite(out[i])) last = out[i]; else out[i] = last;
+  }
+  for (let i = out.length - 1, next = last; i >= 0; i--) {
+    if (isFinite(out[i])) next = out[i]; else out[i] = next;
+  }
+  return out;
+}
+
+function rollingMean(a, win) {
+  const n = a.length;
+  if (win <= 1 || !n) return Array.from(a);
+  const w = Math.min(win, n), left = w >> 1, out = new Float64Array(n);
+  const at = i => a[Math.min(n - 1, Math.max(0, i))];
+  let sum = 0;
+  for (let i = -left; i < w - left; i++) sum += at(i);
+  for (let i = 0; i < n; i++) { out[i] = sum / w; sum += at(i + w - left) - at(i - left); }
+  return Array.from(out);
+}
+
+const minetti = g => {
+  const i = Math.max(-0.45, Math.min(0.45, g));
+  return (155.4*i**5 - 30.4*i**4 - 43.3*i**3 + 46.3*i**2 + 19.5*i + 3.6) / 3.6;
+};
+
+function buildStreams(pts) {
+  const t0 = pts[0].t;
+  const rawT = pts.map(p => p.t - t0);
+  const total = Math.floor(rawT[rawT.length - 1]);
+  if (total < 60) throw new Error("This recording is under a minute long.");
+
+  let rawDist = pts.map(p => p.dist);
+  if (rawDist.every(v => !isFinite(v))) {
+    if (pts.every(p => !isFinite(p.lat))) throw new Error("No distance and no GPS positions.");
+    let acc = 0;
+    rawDist = pts.map((p, i) => (i ? (acc += haversine(pts[i - 1], p)) : 0));
+  }
+  rawDist = fillNaN(rawDist);
+  for (let i = 1; i < rawDist.length; i++)
+    rawDist[i] = Math.max(rawDist[i], rawDist[i - 1]);        // monotonic
+
+  const hasAlt = pts.some(p => isFinite(p.alt));
+  const rawHr = fillNaN(pts.map(p => p.hr));
+  const rawAlt = hasAlt ? fillNaN(pts.map(p => p.alt)) : pts.map(() => 0);
+
+  // Resample onto a uniform 1 Hz grid.
+  const interp = raw => {
+    const out = new Float64Array(total + 1);
+    let j = 0;
+    for (let s = 0; s <= total; s++) {
+      while (j < rawT.length - 2 && rawT[j + 1] < s) j++;
+      const t1 = rawT[j], t2 = rawT[j + 1] ?? t1;
+      const f = t2 === t1 ? 0 : (s - t1) / (t2 - t1);
+      out[s] = raw[j] + ((raw[j + 1] ?? raw[j]) - raw[j]) * Math.max(0, Math.min(1, f));
+    }
+    return Array.from(out);
+  };
+
+  const t = Array.from({ length: total + 1 }, (_, i) => i);
+  const hr = interp(rawHr), dist = interp(rawDist), alt = interp(rawAlt);
+
+  const distSmooth = rollingMean(dist, 10);
+  const speed = t.map((_, i) => {
+    const a = distSmooth[Math.max(0, i - 1)], b = distSmooth[Math.min(total, i + 1)];
+    const span = Math.min(total, i + 1) - Math.max(0, i - 1);
+    return Math.max(0, Math.min(12, span ? (b - a) / span : 0));
+  });
+
+  // grade over a fixed distance window, not per sample
+  const altSmooth = rollingMean(alt, CFG.altSmooth);
+  const grade = t.map((_, i) => {
+    const lo = lowerBound(dist, dist[i] - CFG.gradeWindowM / 2);
+    const hi = Math.max(0, upperBound(dist, dist[i] + CFG.gradeWindowM / 2) - 1);
+    const run = dist[hi] - dist[lo];
+    const g = run > 1 ? (altSmooth[hi] - altSmooth[lo]) / run : 0;
+    return Math.max(-0.45, Math.min(0.45, g));
+  });
+
+  const gv = speed.map((v, i) => v * minetti(grade[i]));
+  const maxGap = Math.max(...rawT.slice(1).map((v, i) => v - rawT[i]));
+  return { t, hr, dist, alt, speed, gv, grade, total, hasAlt, maxGap,
+           start: new Date(pts[0].t * 1000) };
+}
+
+function lowerBound(arr, x) {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] < x) lo = m + 1; else hi = m; }
+  return lo;
+}
+function upperBound(arr, x) {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] <= x) lo = m + 1; else hi = m; }
+  return lo;
+}
+
+// --- metrics
+
+const mean = a => a.reduce((x, y) => x + y, 0) / (a.length || 1);
+const pct = (a, p) => {
+  if (!a.length) return NaN;
+  const s = [...a].sort((x, y) => x - y), i = (s.length - 1) * p / 100;
+  const lo = Math.floor(i), hi = Math.ceil(i);
+  return s[lo] + (s[hi] - s[lo]) * (i - lo);
+};
+
+function ngp(S, idx) {
+  const win = Math.max(1, CFG.ngpWindow);
+  const r = rollingMean(idx.map(i => S.gv[i]), win);
+  return Math.pow(mean(r.map(v => v ** 4)), 0.25);
+}
+
+function halfStats(S, idx) {
+  const hr = idx.map(i => S.hr[i]);
+  const n = ngp(S, idx), m = mean(hr);
+  return { n: idx.length, hr: m, speed: mean(idx.map(i => S.speed[i])),
+           gapSpeed: mean(idx.map(i => S.gv[i])), ngp: n,
+           ef: n / m, efTp: (n / m) * 60 * CFG.yardsPerMetre };
+}
+
+function movingIdx(S, i0, i1) {
+  const idx = [];
+  for (let i = i0; i < i1; i++) if (S.speed[i] >= CFG.stopSpeed) idx.push(i);
+  return idx;
+}
+
+function speedMatched(S, a, b, baseHr, blockMin) {
+  const bin = x => Math.floor(x / CFG.binMs + CFG.binEps);
+  const group = ix => {
+    const m = new Map();
+    for (const i of ix) { const k = bin(S.gv[i]); if (!m.has(k)) m.set(k, []); m.get(k).push(S.hr[i]); }
+    return m;
+  };
+  const g1 = group(a), g2 = group(b);
+  let num = 0, den = 0, used = 0;
+  for (const [k, h1] of g1) {
+    const h2 = g2.get(k);
+    if (!h2 || h1.length < CFG.minBin || h2.length < CFG.minBin) continue;
+    const w = Math.min(h1.length, h2.length);
+    num += w * (mean(h2) - mean(h1)); den += w; used += h1.length + h2.length;
+  }
+  if (!den || !baseHr) return null;
+  const delta = num / den, p = delta / baseHr * 100;
+  return { deltaBpm: delta, pct: p, rate: p * 60 / blockMin,
+           coverage: used / (a.length + b.length) * 100 };
+}
+
+function stability(S, idx) {
+  const hr = idx.map(i => S.hr[i]), t = idx.map(i => S.t[i]);
+  const m = mean(hr), mt = mean(t);
+  let num = 0, den = 0;
+  for (let i = 0; i < hr.length; i++) { num += (t[i]-mt)*(hr[i]-m); den += (t[i]-mt)**2; }
+  const slope = (den ? num / den : 0) * 3600;
+  const within = k => hr.filter(x => Math.abs(x - m) <= k).length / hr.length * 100;
+  return { slope, within5: within(5), pinned: within(5) >= 60 && Math.abs(slope) <= 5 };
+}
+
+function core(S, i0, i1) {
+  const idx = movingIdx(S, i0, i1);
+  if (idx.length < 120) return null;
+  const half = idx.length >> 1;
+  if (!half) return null;
+  const a = idx.slice(0, half), b = idx.slice(-half);
+  const blockMin = (i1 - i0) / 60;
+  const first = halfStats(S, a), second = halfStats(S, b), whole = halfStats(S, idx);
+  const paHrPct = (first.ef - second.ef) / first.ef * 100;
+  const paHr = { pct: paHrPct, rate: paHrPct * 60 / blockMin };
+  const sm = speedMatched(S, a, b, first.hr, blockMin);
+  const stab = stability(S, idx);
+  const usable = sm && sm.coverage >= 40;
+  const primary = (stab.pinned || !usable) ? paHr : sm;
+  return { idx, a, b, first, second, whole, blockMin, paHr, sm, stab, primary,
+           usingMatched: primary === sm };
+}
+
+function sweep(S) {
+  const rates = [], pts = [];
+  for (const start of CFG.starts) for (const block of CFG.blocks) {
+    const i0 = start * 60, i1 = (start + block) * 60;
+    if (i1 > S.total + 1) continue;
+    const c = core(S, i0, i1);
+    if (!c) continue;
+    rates.push(c.primary.rate); pts.push({ start, block, rate: c.primary.rate });
+  }
+  if (!rates.length) return { n: 0 };
+  const p25 = pct(rates, 25), p75 = pct(rates, 75), spread = p75 - p25;
+  const above = rates.filter(r => r > CFG.target).length / rates.length * 100;
+  const agreement = spread > CFG.unstableSpread ? "unstable"
+                  : spread < CFG.tightSpread ? "tight" : "moderate";
+  return { n: rates.length, median: pct(rates, 50), p25, p75, spread, above, agreement,
+           min: Math.min(...rates), max: Math.max(...rates), pts };
+}
+
+function analyse(S) {
+  const i0 = CFG.warmup * 60;
+  const i1 = Math.min(i0 + CFG.duration * 60, S.total);
+  const blockMin = (i1 - i0) / 60;
+  if (blockMin < 15)
+    return { fatal: `The recording is ${(S.total/60).toFixed(0)} minutes long. After a ` +
+      `${CFG.warmup}-minute warm-up that leaves ${Math.max(0, blockMin).toFixed(0)} minutes, ` +
+      `far short of the 60 the test needs.` };
+
+  const c = core(S, i0, i1);
+  if (!c) return { fatal: "Not enough continuous running in this file to analyse." };
+  const sw = sweep(S);
+
+  const inBlock = i1 - i0;
+  const stoppedPct = (1 - c.idx.length / Math.max(1, inBlock)) * 100;
+  const sm60 = rollingMean(c.idx.map(i => S.gv[i]), 60);
+  const speedCv = Math.sqrt(mean(sm60.map(v => (v - mean(sm60)) ** 2))) / mean(sm60) * 100;
+  const hrs = c.idx.map(i => S.hr[i]);
+  const hrSpread = pct(hrs, 95) - pct(hrs, 5);
+  const grade = mean(c.idx.map(i => S.grade[i])) * 100;
+
+  const reasons = [];
+  if (blockMin < CFG.minBlock)
+    reasons.push(`The test block is ${blockMin.toFixed(0)} min. A drift test needs at least ` +
+      `${CFG.minBlock} min of steady effort after the warm-up, and the 5% criterion is defined ` +
+      `for 60. Record a longer run.`);
+  if (stoppedPct > CFG.maxStopped)
+    reasons.push(`${stoppedPct.toFixed(0)}% of the block was stopped or walking. Drift needs ` +
+      `a continuous effort.`);
+  if (speedCv > CFG.maxSpeedCv)
+    reasons.push(`Pace varied by ${speedCv.toFixed(0)}% across the block. The test needs ` +
+      `a steady effort.`);
+  if (hrSpread > CFG.maxHrSpread)
+    reasons.push(`Heart rate ranged over ${hrSpread.toFixed(0)} bpm within the block. That is ` +
+      `not one sustained intensity.`);
+  if (sw.n >= 6 && sw.agreement === "unstable")
+    reasons.push(`The answer depends on where the block is drawn: drift ranges from ` +
+      `${sw.min >= 0 ? "+" : ""}${sw.min.toFixed(0)} to ${sw.max >= 0 ? "+" : ""}` +
+      `${sw.max.toFixed(0)}%/h across reasonable warm-up and block choices, a wider spread than ` +
+      `the ${CFG.target}%/h threshold itself. The effort was too variable to read a threshold from.`);
+
+  const rate = sw.n >= 6 ? sw.median : c.primary.rate;
+  return { c, sw, reasons, usable: !reasons.length, rate, blockMin,
+           stoppedPct, speedCv, hrSpread, grade };
+}
+
+// --- rendering
+
+const pace = v => {
+  if (!(v > 0) || !isFinite(v)) return "--:--";
+  const m = 1000 / v / 60, w = Math.floor(m);
+  let s = Math.round((m - w) * 60);
+  return s === 60 ? `${w + 1}:00` : `${w}:${String(s).padStart(2, "0")}`;
+};
+const esc = s => String(s).replace(/[&<>"]/g, ch =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
+const cell = (k, v, x) =>
+  `<div class="cell"><div class="k">${k}</div><div class="v">${v}</div>` +
+  (x ? `<div class="x">${x}</div>` : "") + "</div>";
+
+function render(S, r, filename) {
+  const out = document.getElementById("out");
+  if (r.fatal) {
+    out.innerHTML = `<div class="answer invalid"><div class="big">Not a valid drift test</div>
+      <div class="line">${esc(r.fatal)}</div></div>`;
+    return;
+  }
+
+  const over = r.rate > CFG.target;
+  const hr = r.c.whole.hr;
+  let head, line;
+  if (!r.usable) {
+    head = "Not a valid drift test";
+    line = "This run cannot answer the question. No threshold can be read from it.";
+  } else if (over) {
+    head = `Drift ${r.rate >= 0 ? "+" : ""}${r.rate.toFixed(1)}%/h &mdash; above 5%`;
+    line = `${hr.toFixed(0)} bpm was <strong>above</strong> your aerobic threshold. ` +
+           `Retest around ${(hr - 6).toFixed(0)} bpm.`;
+  } else {
+    head = `Drift ${r.rate >= 0 ? "+" : ""}${r.rate.toFixed(1)}%/h &mdash; below 5%`;
+    line = `${hr.toFixed(0)} bpm was <strong>at or below</strong> your aerobic threshold. ` +
+           `Retest around ${(hr + 5).toFixed(0)} bpm to find the ceiling.`;
+  }
+
+  let html = `<div class="answer ${!r.usable ? "invalid" : over ? "over" : ""}">
+    <div class="big">${head}</div><div class="line">${line}</div>
+    <div class="thr">${esc(filename)} &middot; ${S.start.toLocaleDateString()} &middot;
+      ${(S.total / 60).toFixed(0)} min &middot;
+      ${(S.dist[S.total] / 1000).toFixed(2)} km</div></div>`;
+
+  if (!r.usable) {
+    html += `<h2>Why</h2><ul class="why">` +
+      r.reasons.map(x => `<li>${esc(x)}</li>`).join("") + `</ul>`;
+  }
+
+  html += `<h2>The block analysed</h2><div class="grid">` + [
+    cell("Block", `${r.blockMin.toFixed(0)} min`, `from minute ${CFG.warmup}`),
+    cell("Avg heart rate", hr.toFixed(0), "bpm"),
+    cell("Heart rate change", `${r.c.second.hr - r.c.first.hr >= 0 ? "+" : ""}` +
+      `${(r.c.second.hr - r.c.first.hr).toFixed(1)}`, "bpm, half to half"),
+    cell("Grade-adj pace", `${pace(r.c.whole.ngp)}/km`, "normalised"),
+    cell("Pa:Hr", `${r.c.paHr.rate >= 0 ? "+" : ""}${r.c.paHr.rate.toFixed(1)}%/h`,
+      r.c.usingMatched ? "not used here" : "used"),
+    cell("Speed-matched", r.c.sm ? `${r.c.sm.rate >= 0 ? "+" : ""}${r.c.sm.rate.toFixed(1)}%/h` : "n/a",
+      r.c.usingMatched ? "used" : "not used here"),
+    cell("Heart rate trend", `${r.c.stab.slope >= 0 ? "+" : ""}${r.c.stab.slope.toFixed(0)}`,
+      `bpm/h &middot; ${r.c.stab.pinned ? "pinned" : "free"}`),
+    cell("Pace variation", `${r.speedCv.toFixed(0)}%`, "across the block"),
+  ].join("") + `</div>`;
+
+  if (r.sw.n >= 6) {
+    html += `<h2>Robustness</h2><div class="grid">` + [
+      cell("Median drift", `${r.sw.median >= 0 ? "+" : ""}${r.sw.median.toFixed(1)}%/h`,
+        `${r.sw.n} block choices`),
+      cell("Range", `${r.sw.p25.toFixed(1)} to ${r.sw.p75.toFixed(1)}`, "interquartile, %/h"),
+      cell("Above 5%/h", `${r.sw.above.toFixed(0)}%`, "of block choices"),
+      cell("Agreement", r.sw.agreement, r.sw.agreement === "tight"
+        ? "same answer wherever you cut" : "the cut matters"),
+    ].join("") + `</div>
+    <details><summary>What this means</summary>
+      <p>A single warm-up and block length is one arbitrary choice. This evaluates
+      ${r.sw.n} of them &mdash; warm-up 8&ndash;20 min against block 40&ndash;60 min &mdash; and
+      reports the spread. A cleanly executed test reads the same wherever you cut it. When the
+      spread is wider than the 5%/h threshold itself, the answer says more about the analyst than
+      the athlete, and no verdict is offered.</p></details>`;
+  }
+
+  out.innerHTML = html;
+}
+
+// --- wiring
+
+const drop = document.getElementById("drop"), input = document.getElementById("file");
+
+function handle(file) {
+  const out = document.getElementById("out");
+  out.innerHTML = `<p class="privacy">Reading ${esc(file.name)}&hellip;</p>`;
+  const reader = new FileReader();
+  reader.onerror = () => { out.innerHTML = `<p class="err">Could not read that file.</p>`; };
+  reader.onload = () => {
+    try {
+      const S = buildStreams(parseActivity(reader.result));
+      render(S, analyse(S), file.name);
+    } catch (err) {
+      out.innerHTML = `<div class="answer invalid"><div class="big">Cannot read this file</div>
+        <div class="line">${esc(err.message)}</div></div>`;
+    }
+  };
+  reader.readAsText(file);
+}
+
+drop.addEventListener("click", () => input.click());
+drop.addEventListener("keydown", e => {
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); }
+});
+input.addEventListener("change", () => input.files[0] && handle(input.files[0]));
+for (const ev of ["dragenter", "dragover"])
+  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("over"); });
+for (const ev of ["dragleave", "drop"])
+  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("over"); });
+drop.addEventListener("drop", e => {
+  const f = e.dataTransfer.files[0];
+  if (f) handle(f);
+});
+
+if (typeof module !== "undefined") module.exports = { parseActivity, buildStreams, analyse };
+</script>
+"""
